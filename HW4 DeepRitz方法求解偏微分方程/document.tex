@@ -1,0 +1,203 @@
+\input{template}
+\title{\bfseries 使用DeepRitz方法求解偏微分方程}
+\author{韦晏洲 \quad PB24000379}
+
+\begin{document}
+	\maketitle
+\begin{abstract}
+	本文旨在探索并复现基于变分原理的深度学习数值算法——Deep Ritz 方法。该方法利用深度神经网络的万能逼近能力，通过最小化能量泛函直接求解物理系统的变分问题。
+	实验过程中，我们对齐了原论文的参数配置，成功拟合了具有 $r^{1/2}$ 奇异性的解析解。此外，本文还通过对比实验验证了残差连接对深度网络收敛稳定性和精度的贡献，以及随机重采样策略在提高泛化精度方面的重要作用。
+\end{abstract}
+	\clearpage
+
+	\section{算法的基本原理}
+	
+	\subsection{数学原理：变分法与 Ritz 思想}
+	Deep Ritz 方法建立在经典的 Ritz 方法基础之上。对于许多物理学和工程学中的偏微分方程（如 Poisson 方程），其求解过程可以等价地转化为一个能量泛函的极小化问题 。
+	以具有 Dirichlet 边界条件的 Poisson 方程为例：
+	\begin{equation}
+		\begin{cases}
+			-\Delta u(x) = f(x), & x \in \Omega \\
+			u(x) = g(x), & x \in \partial\Omega
+		\end{cases}
+	\end{equation}
+	根据变分原理，该问题的解 $u^*$ 是在容许函数空间内使以下能量泛函 $I(u)$ 达到最小的函数：
+	\begin{equation}
+		I(u) = \int_{\Omega} \left( \frac{1}{2} |\nabla u(x)|^2 - f(x)u(x) \right) dx
+	\end{equation}
+	Deep Ritz 方法通过深度神经网络来表示这些试探函数，从而在神经元空间内搜索最优解。
+	
+	\subsection{损失函数：带罚项的能量泛函}
+	在深度学习框架下，能量泛函直接作为神经网络的损失函数 $L(\theta)$。为了处理 Dirichlet 边界条件，通常采用罚函数法（Penalty Method），在泛函中引入边界罚项：
+	\begin{equation}
+		L(\theta) = \int_{\Omega} \left( \frac{1}{2} |\nabla_x u(x; \theta)|^2 - f(x)u(x; \theta) \right) dx + \beta \int_{\partial\Omega} (u(x; \theta) - g(x))^2 dS
+	\end{equation}
+	其中，$\beta$ 是罚参数（通常取较大值，如 500 或更高），用于强迫神经网络在边界上满足 $u \approx g$。最小化此损失函数的过程即为寻找使系统总能量最低的参数 $\theta$。
+	
+	\subsection{网络结构：残差连接 (ResNet)}
+	Deep Ritz 推荐使用残差网络（ResNet）结构来构建近似函数 $u(x; \theta)$。
+	\begin{itemize}
+		\item \textbf{基本单元（Block）：} 每个残差块包含两个全连接层、两个激活函数以及一个残差连接。其数学表达式为 $t = f_i(s) = \phi(W_{i,2} \cdot \phi(W_{i,1}s + b_{i,1}) + b_{i,2}) + s$。
+		\item \textbf{激活函数：} 为了保证解的平滑度，本论文使用分段三次方激活函数 $\phi(x) = \max\{x^3, 0\}$。
+		\item \textbf{优势：} 引入残差连接能有效缓解深度网络中的梯度消失问题，使网络更易于训练并提高求解精度。
+	\end{itemize}
+	
+	\subsection{网络训练方法：SGD 与随机采样}
+	
+	由于能量泛函 $L(\theta)$ 包含连续积分，在计算机实现时，我们需要将其离散化。Deep Ritz 方法的核心在于利用蒙特卡洛思想，将积分转化为离散采样点的求和。
+	
+	\subsubsection{离散损失函数的构造}
+	设 $N$ 为区域 $\Omega$ 内部的采样点数量，$M$ 为边界 $\partial\Omega$ 上的采样点数量。在每一轮迭代中，我们独立同分布地（i.i.d.）从相应区域抽取样本点：
+	\begin{itemize}
+		\item 内部点：$\{x_i\}_{i=1}^N \sim \text{Uniform}(\Omega)$
+		\item 边界点：$\{y_j\}_{j=1}^M \sim \text{Uniform}(\partial\Omega)$
+	\end{itemize}
+	
+	连续损失函数可以近似为如下离散形式 $\hat{L}(\theta)$：
+	\begin{equation}
+		\hat{L}(\theta) \approx \frac{|\Omega|}{N} \sum_{i=1}^{N} \left( \frac{1}{2} |\nabla_x u(x_i; \theta)|^2 - f(x_i)u(x_i; \theta) \right) + \beta \frac{|\partial\Omega|}{M} \sum_{j=1}^{M} (u(y_j; \theta) - g(y_j))^2
+	\end{equation}
+	其中 $|\Omega|$ 和 $|\partial\Omega|$ 分别表示区域的测度（面积/体积）和边界的测度（周长/表面积）。在实际工程实现中，为了简化计算，常将测度系数并入学习率或罚参数 $\beta$ 中，直接计算平均误差。
+	
+	\subsubsection{采样点数量的选取}
+	采样点数量（Batch Size）的选取平衡了计算精度与训练效率：
+	\begin{itemize}
+		\item \textbf{复现取值：} 论文中没有对此参数进行说明，我们设置$N = 1000, M = 0.2N$。
+		\item \textbf{动态重采样：} 与传统有限元法固定网格不同，Deep Ritz 在每一轮迭代中都会重新生成这些点。这种“动态采样”相当于对整个定义域进行连续覆盖，能有效防止模型在特定点过拟合。
+	\end{itemize}
+	
+	\subsection{随机梯度下降 (SGD) 算法逻辑}
+	
+	在得到离散损失 $\hat{L}(\theta)$ 后，我们通过反向传播计算其对网络参数 $\theta$ 的梯度。
+	
+	\subsubsection{参数更新公式}
+	设 $\eta > 0$ 为学习率，在第 $k$ 步迭代中，参数 $\theta$ 的更新规则如下：
+	\begin{equation}
+		\theta_{k+1} = \theta_{k} - \eta \cdot \nabla_\theta \hat{L}(\theta_k)
+	\end{equation}
+	其中梯度的具体形式为：
+	\begin{equation}
+		\nabla_\theta \hat{L}(\theta) = \frac{|\Omega|}{N} \sum_{i=1}^N \nabla_\theta \text{Energy}(x_i; \theta) + \beta \frac{|\partial\Omega|}{M} \sum_{j=1}^M \nabla_\theta \text{Boundary}(y_j; \theta)
+	\end{equation}
+	
+	在实际操作中，我们通常采用 \textbf{Adam 优化器}，它是 SGD 的变体，通过引入动量和自适应学习率来加速收敛：
+	\begin{equation}
+		m_k = \gamma_1 m_{k-1} + (1-\gamma_1) \nabla_\theta \hat{L}, \quad v_k = \gamma_2 v_{k-1} + (1-\gamma_2) (\nabla_\theta \hat{L})^2
+	\end{equation}
+	利用这些中间变量对 $\theta$ 进行更平滑的更新。
+
+	\subsection{定理的证明}
+	
+	\textbf{定理：} 设 $\Omega \subset \mathbb{R}^d$ 是一个有界开区域，其边界 $\partial\Omega$ 足够光滑。令 $f \in L^2(\Omega)$，$g \in H^{1/2}(\partial\Omega)$。定义容许函数类为：
+	\[ \mathcal{A} = \{ u \in H^1(\Omega) : Tu = g \text{ 在 } \partial\Omega \text{ 上} \} \]
+	其中 $T: H^1(\Omega) \to H^{1/2}(\partial\Omega)$ 是迹算子。定义能量泛函 $J: \mathcal{A} \to \mathbb{R}$ 为：
+	\[ J[u] = \int_{\Omega} \left( \frac{1}{2} |\nabla u|^2 - f u \right) dx \]
+	若 $u^* \in \mathcal{A}$ 是 $J$ 的极小值点，即 $u^* = \arg\min_{u \in \mathcal{A}} J[u]$，则 $u^*$ 在弱意义下满足 Poisson 方程：
+	\[ 
+	\begin{cases} 
+		-\Delta u = f, & x \in \Omega \\ 
+		u = g, & x \in \partial\Omega 
+	\end{cases}
+	\]
+	
+	\textbf{证明：}
+	
+	设 $u^* \in \mathcal{A}$ 是泛函 $J[u]$ 的极小值点。对于任意测试函数 $v \in H^1_0(\Omega)$以及任意实数 $\epsilon \in \mathbb{R}$，由于 $\mathcal{A}$ 是一个凸集且 $u^* + \epsilon v$ 在边界上的迹仍为 $g$，故 $u^* + \epsilon v \in \mathcal{A}$。
+	
+	定义标量函数 $\Phi(\epsilon) = J[u^* + \epsilon v]$。由于 $u^*$ 是极小值点，则 $\Phi(\epsilon)$ 在 $\epsilon = 0$ 处取得极小值，根据极值的必要条件，必有：
+	\[ \Phi'(0) = \left. \frac{d}{d\epsilon} J[u^* + \epsilon v] \right|_{\epsilon=0} = 0 \]
+	
+	展开 $J[u^* + \epsilon v]$：
+	\[
+	J[u^* + \epsilon v] = \int_{\Omega} \left( \frac{1}{2} |\nabla (u^* + \epsilon v)|^2 - f (u^* + \epsilon v) \right) dx
+	\]
+	\[
+	= \int_{\Omega} \left( \frac{1}{2} (|\nabla u^*|^2 + 2\epsilon \nabla u^* \cdot \nabla v + \epsilon^2 |\nabla v|^2) - f u^* - \epsilon f v \right) dx
+	\]
+	对 $\epsilon$ 求导：
+	\[
+	\frac{d}{d\epsilon} J[u^* + \epsilon v] = \int_{\Omega} (\nabla u^* \cdot \nabla v + \epsilon |\nabla v|^2 - f v) dx
+	\]
+	令 $\epsilon = 0$，得到：
+	$$	\boxed{
+		\int_{\Omega} \nabla u^* \cdot \nabla v \, dx - \int_{\Omega} f v \, dx = 0, \quad \forall v \in H^1_0(\Omega)
+	}$$
+	
+	此方程即为 Poisson 方程的\textbf{弱形式}。
+	
+	现在假设$u^*$已经满足了Poisson方程的弱形式。
+	根据 Green 第一公式（分部积分），对于 $u^* \in H^2(\Omega)$ 和 $v \in H^1_0(\Omega)$，有：
+	\[ \int_{\Omega} \nabla u^* \cdot \nabla v \, dx = -\int_{\Omega} (\Delta u^*) v \, dx + \int_{\partial\Omega} \frac{\partial u^*}{\partial n} v \, dS \]
+	由于 $v \in H^1_0(\Omega)$，边界积分项 $\int_{\partial\Omega} \frac{\partial u^*}{\partial n} v \, dS = 0$。将此代入变分等式 (1)：
+	\[ \int_{\Omega} (-\Delta u^* - f) v \, dx = 0, \quad \forall v \in H^1_0(\Omega) \]
+	
+	由于上述等式对所有紧支集的测试函数 $v \in H^1_0$ 均成立，因此在 $\Omega$ 内几乎处处有：
+	\[ -\Delta u^* - f = 0 \implies -\Delta u^* = f \]
+	结合 $u^* \in \mathcal{A}$ 所含的边界条件 $u^*|_{\partial\Omega} = g$，得证。
+	\hfill $\square$
+	
+	\section{实验结果}
+	
+	\subsection{复现结果}
+	
+	我们对论文中的例子
+	\[ 
+	\begin{cases} 
+		-\Delta u = 0, & x \in \Omega \\ 
+		u = u(r,\theta) = r^{1/2}\sin(\frac{\theta}{2}), & x \in \partial\Omega 
+	\end{cases}, \quad 
+	\Omega = (-1, 1)^2 \setminus ([0, 1) \times \{0\})
+	\]
+	
+	进行验证，真实解即为$u(r,\theta)$.
+	
+	\fig{3}{1}{\texttt{Block\_num} = 3}
+	\texttt{Block\_num} = 3时L2误差为1.3105e-02，比论文中的0.0079高。
+	
+	\fig{4}{1}{\texttt{Block\_num} = 4}
+	\texttt{Block\_num} = 4时L2误差为4.0789e-03，比论文中的0.0072低。
+	
+	\fig{5}{1}{\texttt{Block\_num} = 5}
+	\texttt{Block\_num} = 5时L2误差为5.3417e-03，比论文中的0.00647低。
+	
+	\subsection{不使用ResNet的结果}
+	将神经网络定义中的两个残差连接部分删去，即可得到没有ResNet的版本。
+	
+	\fig{-resnet 3}{1}{不使用ResNet，\texttt{Block\_num} = 3}
+	\texttt{Block\_num} = 3时L2误差为2.2209e-01，远远不如论文结果。
+	
+	\texttt{Block\_num} = 4时出现训练崩溃（损失函数变成NaN），崩溃之前损失也远远大于使用ResNet的损失。
+	
+	\subsection{采用固定采样点的结果}
+	将随机采样改为固定采样，得到如下结果：
+	
+	\fig{fix3}{1}{固定采样点，\texttt{Block\_num} = 3}
+	\texttt{Block\_num} = 3时L2误差为8.3844e-02，远比论文中的0.0079高。
+	
+	\fig{fix4}{1}{固定采样点，texttt{Block\_num} = 4}
+	\texttt{Block\_num} = 4时L2误差为2.7218e-02，高于论文中的0.0072。
+	
+	\section{结论}
+	本文通过对 Deep Ritz 方法的系统复现与实验分析，得出以下结论：
+	
+	\begin{enumerate}
+		\item \textbf{变分原理与深度学习的有机结合：} Deep Ritz 方法成功将偏微分方程的求解转化为能量泛函的极小化问题，罚函数法能有效处理 Dirichlet 边界并得出不错的精度。
+		
+		\item \textbf{网络架构的关键作用：} 对比实验表明，残差连接（ResNet）在处理较深的网络结构时，能显著缓解梯度消失和损失函数波动，提高解的精度。在相同参数量（591）下，ResNet 架构在解函数变化剧烈的区域误差控制明显优于普通全连接网络。且ResNet的训练远比普通全连接神经网络稳定。
+		
+		\item \textbf{随机采样策略的优越性：} 实验发现，每一轮迭代动态重采样点（SGD）相较于固定配点）具有更强的泛化能力。固定配点容易导致网络在特定坐标点过拟合，而随机采样则实现了蒙特卡洛积分对连续定义域的有效覆盖。
+		
+		\item \textbf{奇异性问题的鲁棒性：} 针对 $r^{1/2} \sin(\theta/2)$ 这种在原点附近梯度无穷大的解析解，Deep Ritz方法展示了极强的自适应拟合能力。
+	\end{enumerate}
+	
+	\section*{AI使用声明}
+	在本项目中本人使用了AI进行辅助，具体为：
+	\begin{enumerate}
+		\item 使用AI进行完成代码，自己仅进行少部分修正与debug。
+		\item 正文各个部分，本人先用几句话写初稿，再交给AI进行适当扩充。但本人始终保证已经检查AI生成的全部内容并可以完全理解。
+		\item 结论和摘要部分，先由AI总结一份初稿，本人再进行修改与扩充。
+	\end{enumerate}
+
+\end{document}
+
+
